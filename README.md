@@ -1,0 +1,1 @@
+This is a sloppy proxy made with a lot of AI assistance for the development, i don't recommend using this. It exists solely to share a reverse engineering attempt at the deepseek api, and turning it into an openai-compatible spec. 
