@@ -1523,30 +1523,70 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 		log.Printf("query=%q model=%s stream=true chars=%d", truncate(buildQuery(req.Messages), 80), req.Model, len(result))
 	} else {
-		result, err := executeToolLoop(chatSessionID, req.Messages, req.Tools, thinking, search, bearerToken, leimToken)
-		if err != nil {
-			writeError(w, "Tool loop error: "+err.Error(), http.StatusInternalServerError)
+		pow, powErr := solvePow(bearerToken, leimToken)
+		if powErr != nil {
+			writeError(w, "PoW failed: "+powErr.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		promptWords := len(strings.Fields(buildQuery(req.Messages)))
-		completionWords := len(strings.Fields(result))
-		response := OpenAIResponse{
-			ID: completionID, Object: "chat.completion", Created: created, Model: req.Model,
-			Choices: []Choice{{
-				Index:        0,
-				Message:      Message{Role: "assistant", Content: result},
-				FinishReason: "stop",
-			}},
-			Usage: &Usage{
-				PromptTokens:     promptWords,
-				CompletionTokens: completionWords,
-				TotalTokens:      promptWords + completionWords,
-			},
+		prompt := buildQuery(req.Messages)
+		if len(req.Tools) > 0 {
+			prompt = formatToolsForPrompt(req.Tools) + "\n\n" + prompt
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
-		log.Printf("query=%q model=%s chars=%d", truncate(buildQuery(req.Messages), 80), req.Model, len(result))
+		resp, reqErr := doDeepSeekRequest(chatSessionID, prompt, thinking, search, bearerToken, leimToken, encodePowResponse(pow))
+		if reqErr != nil {
+			writeError(w, "DeepSeek request failed: "+reqErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			writeError(w, fmt.Sprintf("DeepSeek error %d: %s", resp.StatusCode, string(bodyBytes)), http.StatusBadGateway)
+			return
+		}
+
+		content := parseSSEContent(bodyBytes)
+		toolCalls, cleanedContent := extractToolCalls(content)
+
+		promptWords := len(strings.Fields(buildQuery(req.Messages)))
+
+		if len(toolCalls) > 0 {
+			// Return tool calls to the client in OpenAI format.
+			log.Printf("Returning %d tool calls to client (non-stream)", len(toolCalls))
+			response := OpenAIResponse{
+				ID: completionID, Object: "chat.completion", Created: created, Model: req.Model,
+				Choices: []Choice{{
+					Index:        0,
+					Message:      Message{Role: "assistant", ToolCalls: toolCalls},
+					FinishReason: "tool_calls",
+				}},
+				Usage: &Usage{
+					PromptTokens: promptWords,
+					TotalTokens:  promptWords,
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(response)
+		} else {
+			completionWords := len(strings.Fields(cleanedContent))
+			response := OpenAIResponse{
+				ID: completionID, Object: "chat.completion", Created: created, Model: req.Model,
+				Choices: []Choice{{
+					Index:        0,
+					Message:      Message{Role: "assistant", Content: cleanedContent},
+					FinishReason: "stop",
+				}},
+				Usage: &Usage{
+					PromptTokens:     promptWords,
+					CompletionTokens: completionWords,
+					TotalTokens:      promptWords + completionWords,
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(response)
+		}
+		log.Printf("query=%q model=%s chars=%d", truncate(buildQuery(req.Messages), 80), req.Model, len(cleanedContent))
 	}
 }
 
