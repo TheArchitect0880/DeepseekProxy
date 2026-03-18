@@ -27,8 +27,12 @@ import (
 )
 
 const (
-	deepseekPowURL  = "https://chat.deepseek.com/api/v0/chat/create_pow_challenge"
-	deepseekChatURL = "https://chat.deepseek.com/api/v0/chat/completion"
+	deepseekPowURL           = "https://chat.deepseek.com/api/v0/chat/create_pow_challenge"
+	deepseekChatURL          = "https://chat.deepseek.com/api/v0/chat/completion"
+	deepseekLeimURL          = "https://hif-leim.deepseek.com/query"
+	deepseekSessionCreateURL = "https://chat.deepseek.com/api/v0/chat_session/create"
+	deepseekSessionDeleteURL = "https://chat.deepseek.com/api/v0/chat_session/delete"
+	deepseekLoginURL         = "https://chat.deepseek.com/api/v0/users/login"
 )
 
 var httpClient *http.Client
@@ -133,6 +137,11 @@ var modelMap = map[string]map[string]interface{}{
 	"deepseek-searcher": {
 		"model":            "deepseek-chat",
 		"thinking_enabled": false,
+		"search_enabled":   true,
+	},
+	"deepseek-searcher-reasoning": {
+		"model":            "deepseek-chat",
+		"thinking_enabled": true,
 		"search_enabled":   true,
 	},
 	"default": {
@@ -266,13 +275,25 @@ type PowResponse struct {
 	TargetPath string `json:"target_path"`
 }
 
-func getLeimToken() string {
-	req, _ := http.NewRequest("GET", "https://hif-leim.deepseek.com/query", nil)
+func setDeepSeekHeaders(req *http.Request, bearerToken, leimToken string) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "DeepSeek/1.7.10 Android/34")
 	req.Header.Set("X-Client-Platform", "android")
 	req.Header.Set("X-Client-Version", "1.7.10")
 	req.Header.Set("X-Client-Locale", "en_US")
 	req.Header.Set("X-Client-Bundle-Id", "com.deepseek.chat")
-	req.Header.Set("User-Agent", "DeepSeek/1.7.10 Android/34")
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+	if leimToken != "" {
+		req.Header.Set("X-Hif-Leim", leimToken)
+	}
+}
+
+func getLeimToken() string {
+	req, _ := http.NewRequest("GET", deepseekLeimURL, nil)
+	setDeepSeekHeaders(req, "", "")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -296,22 +317,12 @@ func getLeimToken() string {
 }
 
 func createChatSession(bearerToken, leimToken string) (string, error) {
-	req, err := http.NewRequest("POST", "https://chat.deepseek.com/api/v0/chat_session/create", nil)
+	req, err := http.NewRequest("POST", deepseekSessionCreateURL, nil)
 	if err != nil {
 		return "", err
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "DeepSeek/1.7.10 Android/34")
-	req.Header.Set("X-Client-Platform", "android")
-	req.Header.Set("X-Client-Version", "1.7.10")
-	req.Header.Set("X-Client-Locale", "en_US")
-	req.Header.Set("X-Client-Bundle-Id", "com.deepseek.chat")
-	req.Header.Set("Authorization", "Bearer "+bearerToken)
-	if leimToken != "" {
-		req.Header.Set("X-Hif-Leim", leimToken)
-	}
+	setDeepSeekHeaders(req, bearerToken, leimToken)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -336,6 +347,113 @@ func createChatSession(bearerToken, leimToken string) (string, error) {
 	return result.Data.BizData.ChatSession.ID, nil
 }
 
+func deleteChatSession(sessionID, bearerToken, leimToken string) {
+	reqBody, _ := json.Marshal(map[string]string{
+		"chat_session_id": sessionID,
+	})
+	req, err := http.NewRequest("POST", deepseekSessionDeleteURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		log.Printf("Failed to create delete request: %v", err)
+		return
+	}
+
+	setDeepSeekHeaders(req, bearerToken, leimToken)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		log.Printf("Failed to delete chat session %s: %v", sessionID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Failed to delete chat session %s: status %d", sessionID, resp.StatusCode)
+	} else {
+		log.Printf("Deleted chat session: %s", sessionID)
+	}
+}
+
+func loginWithEmail(email, password string) error {
+	reqBody, _ := json.Marshal(map[string]string{
+		"email":     email,
+		"password":  password,
+		"device_id": "BCENGxKN2pDbPKMGnDoS1h8qocy04sQjsRuFHpECGuw7Oiulee7B56szbu/EkEdTYvxvOKjNdgmxrq359vUeEQg==",
+		"os":        "android",
+	})
+	req, err := http.NewRequest("POST", deepseekLoginURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return err
+	}
+
+
+	leimToken := getLeimToken()
+	setDeepSeekHeaders(req, "", leimToken)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Data struct {
+			BizData struct {
+				User struct {
+					Token string `json:"token"`
+				} `json:"user"`
+			} `json:"biz_data"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to parse login response: %v", err)
+	}
+
+	token := result.Data.BizData.User.Token
+	if token == "" {
+		return fmt.Errorf("no token found in login response")
+	}
+
+	// Write to .env
+	envContent := fmt.Sprintf("DS_BEARER_TOKEN=%s\n", token)
+
+	// Read existing .env if it exists
+	existingEnv, err := os.ReadFile(".env")
+	if err == nil {
+		// Replace existing DS_BEARER_TOKEN or append
+		lines := strings.Split(string(existingEnv), "\n")
+		found := false
+		for i, line := range lines {
+			if strings.HasPrefix(line, "DS_BEARER_TOKEN=") {
+				lines[i] = "DS_BEARER_TOKEN=" + token
+				found = true
+				break
+			}
+		}
+		if found {
+			envContent = strings.Join(lines, "\n")
+		} else {
+			envContent = string(existingEnv)
+			if !strings.HasSuffix(envContent, "\n") {
+				envContent += "\n"
+			}
+			envContent += "DS_BEARER_TOKEN=" + token + "\n"
+		}
+	}
+
+	if err := os.WriteFile(".env", []byte(envContent), 0o600); err != nil {
+		return fmt.Errorf("failed to write .env: %v", err)
+	}
+
+	log.Printf("Login successful! Token saved to .env")
+	return nil
+}
+
 func solvePow(bearerToken, leimToken string) (*PowResponse, error) {
 	payload := map[string]string{"target_path": "/api/v0/chat/completion"}
 	data, _ := json.Marshal(payload)
@@ -345,17 +463,7 @@ func solvePow(bearerToken, leimToken string) (*PowResponse, error) {
 		return nil, err
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "DeepSeek/1.7.10 Android/34")
-	req.Header.Set("X-Client-Platform", "android")
-	req.Header.Set("X-Client-Version", "1.7.10")
-	req.Header.Set("X-Client-Locale", "en_US")
-	req.Header.Set("X-Client-Bundle-Id", "com.deepseek.chat")
-	req.Header.Set("Authorization", "Bearer "+bearerToken)
-	if leimToken != "" {
-		req.Header.Set("X-Hif-Leim", leimToken)
-	}
+	setDeepSeekHeaders(req, bearerToken, leimToken)
 
 	client := httpClient
 	resp, err := client.Do(req)
@@ -973,11 +1081,11 @@ func executeWrite(args map[string]interface{}) ToolResult {
 	}
 
 	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return ToolResult{Error: fmt.Sprintf("Failed to create directory: %v", err)}
 	}
 
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
 		return ToolResult{Error: fmt.Sprintf("Failed to write file: %v", err)}
 	}
 
@@ -1003,7 +1111,7 @@ func executeEdit(args map[string]interface{}) ToolResult {
 	}
 
 	newContent := strings.Replace(string(content), oldString, newString, 1)
-	if err := os.WriteFile(filePath, []byte(newContent), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(newContent), 0o644); err != nil {
 		return ToolResult{Error: fmt.Sprintf("Failed to write file: %v", err)}
 	}
 
@@ -1024,7 +1132,6 @@ func executeBash(args map[string]interface{}) ToolResult {
 	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = workdir
 	output, err := cmd.CombinedOutput()
-
 	if err != nil {
 		return ToolResult{
 			Content: string(output),
@@ -1128,7 +1235,6 @@ func executeGrep(args map[string]interface{}) ToolResult {
 
 		return nil
 	})
-
 	if err != nil {
 		return ToolResult{Error: fmt.Sprintf("Grep failed: %v", err)}
 	}
@@ -1231,18 +1337,9 @@ func doDeepSeekRequest(chatSessionID, prompt string, thinking, search bool, bear
 		return nil, err
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
+	setDeepSeekHeaders(httpReq, bearerToken, leimToken)
 	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("User-Agent", "DeepSeek/1.7.10 Android/34")
-	httpReq.Header.Set("X-Client-Platform", "android")
-	httpReq.Header.Set("X-Client-Version", "1.7.10")
-	httpReq.Header.Set("X-Client-Locale", "en_US")
-	httpReq.Header.Set("X-Client-Bundle-Id", "com.deepseek.chat")
 	httpReq.Header.Set("X-Ds-Pow-Response", powResp)
-	httpReq.Header.Set("Authorization", "Bearer "+bearerToken)
-	if leimToken != "" {
-		httpReq.Header.Set("X-Hif-Leim", leimToken)
-	}
 
 	return httpClient.Do(httpReq)
 }
@@ -1456,6 +1553,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "Failed to create chat session: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer deleteChatSession(chatSessionID, bearerToken, leimToken)
 
 	completionID := "chatcmpl-" + uuid.New().String()
 	created := time.Now().Unix()
@@ -1488,7 +1586,6 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// so we can detect tool calls before sending to the client.
 		var result string
 		result, err = streamResponse(chatSessionID, req.Messages, req.Tools, thinking, search, bearerToken, leimToken, sendChunk)
-
 		if err != nil {
 			log.Printf("Stream error: %v", err)
 			errChunk, _ := json.Marshal(map[string]interface{}{
@@ -1640,6 +1737,18 @@ func truncate(s string, n int) string {
 }
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "--login" {
+		var email, password string
+		fmt.Print("Email: ")
+		fmt.Scanln(&email)
+		fmt.Print("Password: ")
+		fmt.Scanln(&password)
+		if err := loginWithEmail(email, password); err != nil {
+			log.Fatalf("Login failed: %v", err)
+		}
+		return
+	}
+
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file, reading from environment")
 	}
