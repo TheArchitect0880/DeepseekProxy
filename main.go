@@ -1602,7 +1602,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			if len(toolCalls) > 0 {
 				// Return tool calls in OpenAI format — let the client handle execution.
 				log.Printf("Returning %d tool calls to client", len(toolCalls))
-				sendChunk(Delta{ToolCalls: toolCalls}, nil)
+				sendChunk(Delta{Content: cleanedContent, ToolCalls: toolCalls}, nil)
 				toolCallsReason := "tool_calls"
 				sendChunk(Delta{}, &toolCallsReason)
 				fmt.Fprintf(w, "data: [DONE]\n\n")
@@ -1655,7 +1655,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				ID: completionID, Object: "chat.completion", Created: created, Model: req.Model,
 				Choices: []Choice{{
 					Index:        0,
-					Message:      Message{Role: "assistant", ToolCalls: toolCalls},
+					Message:      Message{Role: "assistant", Content: cleanedContent, ToolCalls: toolCalls},
 					FinishReason: "tool_calls",
 				}},
 				Usage: &Usage{
